@@ -1,0 +1,22 @@
+-- Synthetic legacy schema inferred from the supplied app, NOT the production schema.
+create role anon;
+create role authenticated;
+create role service_role;
+create schema auth;
+create table auth.users(id uuid primary key);
+create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;
+create function auth.role() returns text language sql stable as $$select nullif(current_setting('request.jwt.claim.role',true),'')$$;
+grant usage on schema auth to authenticated,anon,service_role;
+grant execute on all functions in schema auth to authenticated,anon,service_role;
+create table public.profiles(id uuid primary key references auth.users(id), name text,default_hourly_rate numeric,default_work_type text);
+create table public.chat_entries(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),original_text text,detected_type text,confidence numeric,status text,created_at timestamptz default now());
+create table public.todo_items(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),title text,description text,category text,priority text,due_date date,status text,created_at timestamptz default now());
+create table public.todo_lists(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),title text,category text,priority text,created_at timestamptz default now());
+create table public.todo_list_items(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),list_id uuid references public.todo_lists(id),text text,completed boolean,created_at timestamptz default now());
+create table public.finance_entries(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),type text,date date,amount numeric,category text,description text,payment_type text,notes text,created_at timestamptz default now());
+create table public.work_shifts(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),date date,work_type text,start_time text,end_time text,hours_worked numeric,hourly_rate numeric,cash_tips numeric,digital_tips numeric,total_tips numeric,wage_pay numeric,total_shift_income numeric,tips_per_hour numeric,notes text,created_at timestamptz default now());
+create table public.habits(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),name text,description text,frequency text,target_amount numeric,target_unit text,reminder_time text,is_temporary boolean,start_date date,end_date date,created_at timestamptz default now());
+create table public.habit_completions(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),habit_id uuid references public.habits(id),date date,status text,amount_completed numeric,created_at timestamptz default now());
+create table public.reminders(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id),title text,date date,time text,repeat_rule text,linked_type text,linked_id uuid,notes text,created_at timestamptz default now());
+create table public.calendar_shares(id uuid primary key default gen_random_uuid(),user_id uuid references auth.users(id));
+grant select,insert,update,delete on all tables in schema public to authenticated;

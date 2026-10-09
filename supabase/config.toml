@@ -1,0 +1,7 @@
+# Draft functions. Deployment is a separate, explicitly authorized step.
+[functions.anchor-ai]
+verify_jwt = true
+
+[functions.reminder-dispatcher]
+# Uses a dedicated server-only scheduler secret, checked by the function itself.
+verify_jwt = false

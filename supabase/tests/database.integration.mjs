@@ -1,0 +1,75 @@
+// Optional real PostgreSQL-in-WASM integration test against a synthetic legacy schema.
+// npm install --prefix /tmp/anchor-dbtest --cache /tmp/anchor-npm-cache @electric-sql/pglite@0.3.14
+// PGLITE_MODULE=/tmp/anchor-dbtest/node_modules/@electric-sql/pglite/dist/index.js node supabase/tests/database.integration.mjs
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+const {PGlite}=await import(process.env.PGLITE_MODULE||'@electric-sql/pglite');
+const db=new PGlite();
+const sql=(text,params=[])=>db.query(text,params);
+let checks=0;
+function ok(label){checks++;console.log('PASS',label);}
+try {
+ await db.exec(await readFile(new URL('./schema-fixture.sql',import.meta.url),'utf8'));
+ await db.exec(await readFile(new URL('../migrations/202610080001_anchor_product_upgrade.sql',import.meta.url),'utf8'));
+ ok('entire migration parses and applies on synthetic legacy schema');
+ const u='11111111-1111-4111-8111-111111111111', other='22222222-2222-4222-8222-222222222222';
+ await sql('insert into auth.users values ($1),($2)',[u,other]);
+ await sql('insert into public.profiles(id,default_hourly_rate) values($1,20),($2,30)',[u,other]);
+ await sql("select set_config('request.jwt.claim.sub',$1,false),set_config('request.jwt.claim.role','authenticated',false)",[u]);
+ const pref=(patch)=>sql('select public.anchor_patch_preferences($1::jsonb) result',[JSON.stringify(patch)]);
+ await pref({timezone:'America/New_York',ai_enabled:true});
+ const p=await pref({reminders_enabled:true});
+ assert.equal(p.rows[0].result.ai_enabled,true); assert.equal(p.rows[0].result.reminders_enabled,true);
+ await assert.rejects(()=>pref({timezone:'Not/AZone'})); await assert.rejects(()=>pref({ai_enabled:'yes'}));
+ await pref({work_types:[{name:'Hotel',rate:20,color:'#63b7da'}],vehicles:[{name:'Car',type:'Car',mpg:30,color:null,def:true}],work_locations:[{name:'Work',addr:'Main St',oneWay:10,def:true}]});
+ for(const patch of [{work_types:['bad']},{vehicles:[{name:'Car',color:'red;position:fixed'}]},{work_types:[{name:'Job',rate:-1}]},{work_locations:[{name:'Work',url:'https://bad'}]},{vehicles:[{name:'Car',def:'true'}]}]) await assert.rejects(()=>pref(patch));
+ ok('preferences merge and nested field validation reject malformed values');
+ const save=(id,entry)=>sql('select public.anchor_save_entry($1,$2::jsonb) result',[id,JSON.stringify(entry)]);
+ const id='33333333-3333-4333-8333-333333333333';
+ const list={detected_type:'todo_list',data:{title:'Groceries',items:['Milk','Eggs']}};
+ const first=(await save(id,list)).rows[0].result;
+ const second=(await save(id,list)).rows[0].result;
+ assert.equal(first.records.length,3);assert.equal(second.replayed,true);
+ assert.equal((await sql('select count(*)::int n from public.todo_list_items')).rows[0].n,2);
+ await assert.rejects(()=>save(id,{...list,data:{title:'Different'}}));
+ ok('list compound create is idempotent and rejects reused id with changed payload');
+ const before=(await sql('select count(*)::int n from public.todo_lists')).rows[0].n;
+ await assert.rejects(()=>save('44444444-4444-4444-8444-444444444444',{detected_type:'todo_list',data:{title:'Fail atomically',items:['One',42]}}));
+ assert.equal((await sql('select count(*)::int n from public.todo_lists')).rows[0].n,before);
+ ok('invalid child insert rolls back parent and request ledger');
+ await save('55555555-5555-4555-8555-555555555555',{detected_type:'work_shift',data:{date:'2026-10-08',start_time:'10:00 pm',end_time:'2:00 am',hourly_rate:20,cash_tips:8,digital_tips:2,total_shift_income:999999},commute:{cost:3.12,miles:20,mpg:30,veh:{name:'Car'}}});
+ const shift=(await sql('select hours_worked,total_shift_income from public.work_shifts')).rows[0];
+ assert.equal(Number(shift.hours_worked),4);assert.equal(Number(shift.total_shift_income),90);
+ assert.equal(Number((await sql('select amount from public.finance_entries')).rows[0].amount),3.12);
+ ok('shift totals computed server-side with overnight hours and atomic gas expense');
+ const h=await save('66666666-6666-4666-8666-666666666666',{detected_type:'habit',data:{name:'Stretch',frequency:'Daily',reminder_time:'8:00 am'}});
+ assert.equal(h.rows[0].result.records.length,2);
+ assert.equal((await sql("select count(*)::int n from anchor_private.reminder_jobs where status='scheduled'")).rows[0].n,1);
+ ok('habit and linked reminder created atomically, opt-in schedules it');
+ const monthly=(await sql("select anchor_private.next_reminder_time('2026-01-31','09:00','Monthly','UTC','2026-01-31 10:00Z')::text t")).rows[0].t;
+ assert.ok(monthly.startsWith('2026-03-31 09:00:00'));
+ const daily=(await sql("select anchor_private.next_reminder_time('2026-03-07','09:00','Daily','America/New_York','2026-03-07 15:00Z')::text t")).rows[0].t;
+ assert.ok(daily.startsWith('2026-03-08 13:00:00'));
+ const gap=(await sql("select anchor_private.next_reminder_time('2026-03-08','02:30','None','America/New_York','2026-03-07 00:00Z')::text t")).rows[0].t;
+ assert.ok(gap.startsWith('2026-03-08 07:30:00'));
+ ok('monthly skips missing date; daily preserves wall-clock across DST and gap policy');
+ await sql('set role authenticated');
+ assert.equal((await sql('select count(*)::int n from public.todo_lists')).rows[0].n,1);
+ await sql("select set_config('request.jwt.claim.sub',$1,false)",[other]);
+ assert.equal((await sql('select count(*)::int n from public.todo_lists')).rows[0].n,0);
+ await assert.rejects(()=>sql('select * from anchor_private.entry_requests'));
+ await assert.rejects(()=>sql("select public.anchor_reserve_ai_usage($1,2000)",[other]));
+ await sql('reset role');
+ await sql("select set_config('request.jwt.claim.sub',$1,false),set_config('request.jwt.claim.role','service_role',false)",[u]);
+ ok('real role RLS prevents cross-user reads and private-ledger/quota access');
+ for(let i=0;i<10;i++) assert.equal((await sql('select public.anchor_reserve_ai_usage($1,2000) result',[u])).rows[0].result.allowed,true);
+ assert.equal((await sql('select public.anchor_reserve_ai_usage($1,2000) result',[u])).rows[0].result.allowed,false);
+ ok('locked usage reservation enforces ten requests per minute');
+ await sql("update anchor_private.reminder_jobs set next_run_at=now()-interval '1 minute' where status='scheduled'");
+ const dispatched=(await sql('select public.anchor_dispatch_reminders() result')).rows[0].result;
+ assert.equal(dispatched.delivered,1);assert.equal((await sql('select public.anchor_dispatch_reminders() result')).rows[0].result.delivered,0);
+ await pref({reminders_enabled:false});
+ assert.equal((await sql("select count(*)::int n from anchor_private.reminder_jobs where status='scheduled'")).rows[0].n,0);
+ ok('dispatcher queues in-app occurrence once and opt-out cancels future dispatch');
+ console.log(`${checks} database integration checks passed. This does not verify the production schema.`);
+} catch(error) { console.error('FAIL:',error.message, error.detail||'', error.where||'', 'position',error.position,'internal',error.internalQuery||''); if(error.position&&error.query) console.error(error.query.slice(Math.max(0,Number(error.position)-250),Number(error.position)+250)); process.exitCode=1; } finally {await db.close();}

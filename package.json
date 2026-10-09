@@ -1,0 +1,15 @@
+{
+  "name": "anchor-life-tracker",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Anchor personal life tracker",
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.cjs supabase/tests/*.test.ts",
+    "check": "node --check assets/core.js && node --check assets/app.js",
+    "test:core": "node --test tests/core.test.cjs",
+    "test:backend": "node --experimental-strip-types --test supabase/tests/*.test.ts"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.1"
+  }
+}
